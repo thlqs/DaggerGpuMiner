@@ -15,6 +15,7 @@ using namespace XDag;
 #define OUTPUT_SIZE 256
 #define OUTPUT_MASK OUTPUT_SIZE - 1
 #define SMALL_ITERATIONS_COUNT 5
+#define NVIDIA_SPIN_DAMP 0.9
 
 unsigned CLMiner::_sWorkgroupSize = CLMiner::_defaultLocalWorkSize;
 unsigned CLMiner::_sInitialGlobalWorkSize = CLMiner::_defaultGlobalWorkSizeMultiplier * CLMiner::_defaultLocalWorkSize;
@@ -414,7 +415,7 @@ bool CLMiner::Initialize()
         }
         // create context
         _context = cl::Context(std::vector<cl::Device>(&device, &device + 1));
-        _queue = cl::CommandQueue(_context, device);
+        _queue = cl::CommandQueue(_context, device, CL_QUEUE_PROFILING_ENABLE);
 
         // make sure that global work size is evenly divisible by the local workgroup size
         _workgroupSize = _sWorkgroupSize;
@@ -480,6 +481,7 @@ void CLMiner::WorkLoop()
     uint64_t results[OUTPUT_SIZE + 1];
     uint64_t zeroBuffer[OUTPUT_SIZE + 1];
     memset(zeroBuffer, 0, (OUTPUT_SIZE + 1) * sizeof(uint64_t));
+    bool hasSolution = false;
 
     try
     {
@@ -541,30 +543,17 @@ void CLMiner::WorkLoop()
                 iterations = maxIterations;
                 workSize = _globalWorkSize;
             }
+            _searchKernel.setArg(2, nonce);
             _searchKernel.setArg(3, iterations);
 
-            bool hasSolution = false;
-            if(loopCounter > 0)
-            {
-                // Read results.
-                _queue.enqueueReadBuffer(_searchBuffer, CL_FALSE, 0, (OUTPUT_SIZE + 1) * sizeof(uint64_t), results);
-                WaitKernel(loopCounter);                
-
-                //miner returns an array with 257 64-bit values. If nonce for hash lower than target hash is found - it is written to array. 
-                //the last value in array marks if any solution was found
-                hasSolution = results[OUTPUT_SIZE] > 0;
-                if(hasSolution)
-                {
-                    // Reset search buffer if any solution found.
-                    _queue.enqueueWriteBuffer(_searchBuffer, CL_FALSE, 0, sizeof(zeroBuffer), zeroBuffer);
-                }
-            }
-
             // Run the kernel.
-            _searchKernel.setArg(2, nonce);
-            _queue.enqueueNDRangeKernel(_searchKernel, cl::NullRange, workSize, _workgroupSize);
+            cl::Event clEvent;
+            _queue.enqueueNDRangeKernel(_searchKernel, cl::NullRange, workSize, _workgroupSize, NULL, &clEvent);
 
-            // Report results while the kernel is running.
+            // Increase start nonce for following kernel execution.
+            nonce += workSize * iterations;
+
+            // check results of the previous loop while the kernel is running.
             // It takes some time because hashes must be re-evaluated on CPU.
             if(hasSolution)
             {
@@ -577,8 +566,18 @@ void CLMiner::WorkLoop()
                 _queue.enqueueWriteBuffer(_minHashBuffer, CL_FALSE, 0, 32, taskWrapper->GetTask()->minhash.data);
             }
 
-            // Increase start nonce for following kernel execution.
-            nonce += workSize * iterations;
+            // Read results.
+            _queue.enqueueReadBuffer(_searchBuffer, CL_FALSE, 0, (OUTPUT_SIZE + 1) * sizeof(uint64_t), results);
+            WaitKernel(loopCounter, clEvent);
+
+            //miner returns an array with 257 64-bit values. If nonce for hash lower than target hash is found - it is written to array. 
+            //the last value in array marks if any solution was found
+            hasSolution = results[OUTPUT_SIZE] > 0;
+            if(hasSolution)
+            {
+                // Reset search buffer if any solution found.
+                _queue.enqueueWriteBuffer(_searchBuffer, CL_FALSE, 0, sizeof(zeroBuffer), zeroBuffer);
+            }
 
             // Report hash count
             AddHashCount(workSize * iterations);
@@ -732,9 +731,9 @@ void CLMiner::SetMinShare(XTaskWrapper* taskWrapper, uint64_t* searchBuffer, che
     taskWrapper->SetShare(last.data, minHash);
 }
 
-void CLMiner::WaitKernel(uint32_t loopCounter)
+void CLMiner::WaitKernel(uint32_t loopCounter, cl::Event& clEvent)
 {
-    if(loopCounter <= SMALL_ITERATIONS_COUNT)// || _platformId != OPENCL_PLATFORM_NVIDIA)
+    if(loopCounter < SMALL_ITERATIONS_COUNT)// || _platformId != OPENCL_PLATFORM_NVIDIA)
     {
         _queue.finish();
     }
@@ -745,18 +744,27 @@ void CLMiner::WaitKernel(uint32_t loopCounter)
         //during executing the opencl program nvidia opencl library enters loop which checks if the execution of opencl program has ended
         //so, current thread just spins in this loop, eating CPU for nothing.
         //workaround for the problem: add sleep for some calculated time after the kernel was queued and flushed
+
+        //unfortunately, it does not work...
         //auto startTimeSleep = std::chrono::high_resolution_clock::now();
         if(_kernelExecutionMcs > 0)
         {
-            std::this_thread::sleep_for(std::chrono::microseconds(_kernelExecutionMcs));
+            std::this_thread::sleep_for(std::chrono::microseconds((uint32_t)(_kernelExecutionMcs * NVIDIA_SPIN_DAMP)));
         }
         //auto endTimeSleep = std::chrono::high_resolution_clock::now();
-        auto startTime = std::chrono::high_resolution_clock::now();        
-        _queue.finish();
-        auto endTime = std::chrono::high_resolution_clock::now();
-        std::chrono::microseconds duration = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime);
+
+        clEvent.wait();
+
+        cl_ulong time_start;
+        cl_ulong time_end;
+        clEvent.getProfilingInfo(CL_PROFILING_COMMAND_START, &time_start);
+        clEvent.getProfilingInfo(CL_PROFILING_COMMAND_END, &time_end);
+
+        _kernelExecutionMcs = (time_end - time_start) / 1000;
+
         //std::chrono::microseconds durationSleep = std::chrono::duration_cast<std::chrono::microseconds>(endTimeSleep - startTimeSleep);
-        _kernelExecutionMcs = (_kernelExecutionMcs + duration.count()) * 0.9;   // auto-adjectment of sleep time
-        //std::cout << "Sleep: " << durationSleep.count() << "  kernel: " << duration.count() << "  estimated: " << _kernelExecutionMcs << std::endl;
+        //std::cout << "Calc time: " << _kernelExecutionMcs << "  Sleep: " << durationSleep.count() << std::endl;
+
+        _queue.finish();
     }
 }

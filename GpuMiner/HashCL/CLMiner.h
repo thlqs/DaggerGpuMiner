@@ -75,7 +75,7 @@ namespace XDag
         bool LoadKernelCode();
 
         void SetMinShare(XTaskWrapper* taskWrapper, uint64_t* searchBuffer, cheatcoin_field& last);
-        void WaitKernel(uint32_t loopCounter);
+        void WaitKernel(uint32_t loopCounter, cl::Event& clEvent);
 
         cl::Context _context;
         cl::CommandQueue _queue;
