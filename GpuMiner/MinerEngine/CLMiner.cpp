@@ -22,11 +22,15 @@ using namespace XDag;
 #define KERNEL_ARG_OUTPUT 6
 //TODO: weird, but it decreases performance...
 //#define USE_VECTORS
-#define KERNEL_ITERATIONS 8
+#define KERNEL_ITERATIONS 16
 
 unsigned CLMiner::_sWorkgroupSize = CLMiner::_defaultLocalWorkSize;
 unsigned CLMiner::_sInitialGlobalWorkSize = CLMiner::_defaultGlobalWorkSizeMultiplier * CLMiner::_defaultLocalWorkSize;
+#ifdef __linux__
+std::string CLMiner::_clKernelName = "CL/CLMiner_kernel.cl";
+#else
 std::string CLMiner::_clKernelName = "CLMiner_kernel.cl";
+#endif
 bool CLMiner::_useOpenClCpu = false;
 
 struct CLChannel : public LogChannel
@@ -44,7 +48,6 @@ struct CLChannel : public LogChannel
  */
 static const char *strClError(cl_int err)
 {
-
     switch(err)
     {
     case CL_SUCCESS:
@@ -544,7 +547,6 @@ void CLMiner::WorkLoop()
             }
             
             bool hasSolution = false;
-            _queue.enqueueReadBuffer(_searchBuffer, CL_FALSE, 0, (OUTPUT_SIZE + 1) * sizeof(uint64_t), results);
             if(loopCounter > 0)
             {
                 // Read results.
@@ -570,7 +572,7 @@ void CLMiner::WorkLoop()
             {
                 //we need to recalculate hashes for all founded nonces and choose the minimal one
                 SetMinShare(taskWrapper, results, last);
-#if _DEBUG
+#ifdef _DEBUG
                 std::cout << HashToHexString(taskWrapper->GetTask()->minhash.data) << std::endl;
 #endif
                 //new minimal hash is written as target hash for GPU
@@ -724,7 +726,7 @@ void CLMiner::SetMinShare(XTaskWrapper* taskWrapper, uint64_t* searchBuffer, che
         }
     }
 
-#if _DEBUG
+#ifdef _DEBUG
     assert(minNonce > 0);
 #endif
     if(minNonce > 0)
