@@ -772,10 +772,12 @@ void CLMiner::ReadData(uint64_t* results)
         {
             std::this_thread::sleep_for(std::chrono::microseconds(_kernelExecutionMcs));
         }
+        uint32_t before = _kernelExecutionMcs;
         auto startTime = std::chrono::high_resolution_clock::now();
         _queue.enqueueReadBuffer(_searchBuffer, CL_TRUE, 0, (OUTPUT_SIZE + 1) * sizeof(uint64_t), results);
         auto endTime = std::chrono::high_resolution_clock::now();
         std::chrono::microseconds duration = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime);
         _kernelExecutionMcs = (uint32_t)((_kernelExecutionMcs + duration.count()) * NVIDIA_SPIN_DAMP);
+        std::cout << "Sleep time current: " << before << " next: " << _kernelExecutionMcs << std::endl;
     }
 }
